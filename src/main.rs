@@ -9,13 +9,37 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 #[tokio::main]
 async fn main()
 {
-    let chrome_url = url::Url::parse(
-        "ws://127.0.0.1:8080/devtools/browser/ca96cad9-d247-42a1-bca7-410de7d464a3",
-    )
-    .unwrap();
-    // let chrome_url = url::Url::parse("ws://localhost:3000").unwrap();
+    let response = reqwest::get("http://localhost:8080/json")
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let response_json = json::parse(&response).expect("unable to parse google response");
+
+    let session_url = response_json[0]["webSocketDebuggerUrl"].as_str().unwrap();
+
+    let chrome_url = url::Url::parse(session_url).unwrap();
 
     let (sender, receiver) = futures_channel::mpsc::unbounded();
+
+    let performance_enabled = object! {
+        id: 1,
+        method: "Performance.enable",
+        params: object! {
+            timeDomain: "timeTicks",
+        }
+    };
+    sender
+        .unbounded_send(Message::Text(String::from(performance_enabled.dump())))
+        .expect("couldn't send page enable message");
+
+    let page_enable = object! {
+        id: 2,
+        method: "Page.enable", 
+    };
+    sender.unbounded_send(Message::Text(String::from(page_enable.dump()))).expect("couldn't send page enable message");
     tokio::spawn(read_stdin(sender));
 
     let (ws_stream, _) = connect_async(chrome_url).await.expect("Failed to connect");
@@ -26,7 +50,6 @@ async fn main()
     let stdin_to_ws = receiver.map(Ok).forward(write);
     let ws_to_stdout = {
         read.for_each(|message| async {
-            println!("{:?}", message);
             let data = match message
             {
                 Ok(some) => some.into_data(),
@@ -47,6 +70,7 @@ async fn main()
 // sender provided.
 async fn read_stdin(sender: futures_channel::mpsc::UnboundedSender<Message>)
 {
+    let mut counter = 3;
     let mut stdin = tokio::io::stdin();
     loop
     {
@@ -62,12 +86,13 @@ async fn read_stdin(sender: futures_channel::mpsc::UnboundedSender<Message>)
         let url = str::from_utf8(&buf).unwrap();
 
         let data = object! {
-            id: 1,
+            id: 3,
             method: "Page.navigate",
             params: object! {
                 url: url
             }
         };
+        counter = counter + 1;
         println!("{}", data.dump());
         sender
             .unbounded_send(Message::Text(String::from(data.dump())))
