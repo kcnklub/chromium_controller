@@ -91,6 +91,7 @@ mod tests
 {
     use std::{net::TcpListener, thread::spawn, vec};
 
+    use serde_json::{json, Value};
     use tungstenite::accept;
 
     use crate::{ChromeAPI, ChromeSession, ChromiumBrowser};
@@ -117,11 +118,39 @@ mod tests
 
         let url = String::from("http://test_url.com");
 
-        let _browser = match ChromiumBrowser::connect_with_client(&MockChromeClient {}, &url)
-        {
-            Ok(browser) => browser,
-            Err(error) => panic!("{error}"),
-        };
+        ChromiumBrowser::connect_with_client(&MockChromeClient {}, &url).unwrap();
+    }
+
+    #[test]
+    fn run_command()
+    {
+        spawn(|| {
+            let server = TcpListener::bind("127.0.0.1:8081").unwrap();
+            for stream in server.incoming()
+            {
+                let mut web_socket = accept(stream.unwrap()).unwrap();
+
+                let message = web_socket.read_message().unwrap();
+                assert!(message.is_text());
+                let data: Value = serde_json::from_str(&message.to_string()).unwrap();
+
+                assert_eq!("Page.navigate", data["method"])
+            }
+        });
+
+        let url = String::from("http://test_url.com"); 
+
+        let mut browser = ChromiumBrowser::connect_with_client(&MockChromeClient {}, &url).unwrap();
+
+        let mut message = json!({
+            "id": 1, 
+            "method": "Page.navigate", 
+            "params": {
+            "url": "https://google.com", 
+            }
+        });
+
+        browser.run_command(&mut message).unwrap();
     }
 
     fn start_mock_server()
@@ -130,7 +159,7 @@ mod tests
             let server = TcpListener::bind("127.0.0.1:8081").unwrap();
             for stream in server.incoming()
             {
-                accept(stream.unwrap()).unwrap();
+                let mut web_socket = accept(stream.unwrap()).unwrap();
             }
         });
     }
