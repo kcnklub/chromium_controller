@@ -1,80 +1,137 @@
-use futures::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
-use json::JsonValue;
-use std::error::Error;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-
-const WS_DEBUGGER_URL: &str = "webSocketDebuggerUrl";
-
-pub mod cdp_messages;
+use log::trace;
+use serde::Deserialize;
+use serde_json::Value;
+use std::{error::Error, net::TcpStream};
+use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 
 #[derive()]
 pub struct ChromiumBrowser
 {
-    connection_url: String,
-    write_sink: Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
-    read_stream: Option<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+    websocket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
 
 impl ChromiumBrowser
 {
-    pub fn new(connection_url: String) -> Self
+    pub fn connect_with_client(
+        client: &dyn ChromeAPI,
+        url: &String,
+    ) -> Result<ChromiumBrowser, Box<dyn Error>>
     {
-        return ChromiumBrowser {
-            connection_url,
-            write_sink: None,
-            read_stream: None,
-        };
+        let web_socket = ChromiumBrowser::get_websocket(client, &url)?;
+        trace!("Create websocket success");
+        Ok(ChromiumBrowser {
+            websocket: web_socket,
+        })
     }
 
-    pub async fn connect(&mut self) -> Result<(), Box<dyn Error>>
+    pub fn connect(url: &String) -> Result<ChromiumBrowser, Box<dyn Error>>
     {
-        let response = reqwest::get(&self.connection_url)
-            .await
-            .unwrap()
-            .text()
-            .await
-            .expect("Cannot get response from /json");
+        let client = ChromeAPIClient {};
 
-        let response_json = json::parse(&response).expect("Cannot parse response into json");
+        ChromiumBrowser::connect_with_client(&client, url)
+    }
 
-        let session_url = response_json[0][WS_DEBUGGER_URL]
-            .as_str()
-            .expect("Cannot get debugger url");
-
-        let chrome_url = url::Url::parse(session_url).unwrap();
-
-        let (ws_stream, _) = connect_async(chrome_url).await.expect("Failed to connect");
-
-        let (write, read) = ws_stream.split();
-        self.write_sink = Some(write);
-        self.read_stream = Some(read);
+    fn get_websocket(
+        client: &dyn ChromeAPI,
+        url: &String,
+    ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, Box<dyn Error>>
+    {
+        let response = client.get_websocket_session_url(&url)?;
+        let (ws_stream, _) = connect(&response[0].web_socket_debugger_url)?;
         println!("WebSocket handshake has been successfully completed");
 
-        Ok(())
+        Ok(ws_stream)
     }
 
-    pub async fn run_command(
+    pub fn run_command(
         &mut self,
-        command: &mut JsonValue,
+        command: &mut Value,
     ) -> Result<(), Box<dyn Error>>
     {
         command["id"] = 1.into();
 
-        match self
-            .write_sink
-            .as_mut()
-            .unwrap()
-            .send(Message::text(command.dump()))
-            .await
-        {
-            Ok(()) => println!("Command end to chrome"),
-            Err(error) => println!("Command errored: {error}"),
-        };
+        self.websocket
+            .write_message(Message::Text(command.to_string()))?;
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChromeSession
+{
+    #[serde(rename = "webSocketDebuggerUrl")]
+    web_socket_debugger_url: String,
+}
+
+pub trait ChromeAPI
+{
+    fn get_websocket_session_url(
+        &self,
+        chrome_json_url: &String,
+    ) -> Result<Vec<ChromeSession>, Box<dyn std::error::Error>>;
+}
+
+struct ChromeAPIClient;
+impl ChromeAPI for ChromeAPIClient
+{
+    fn get_websocket_session_url(
+        &self,
+        chrome_json_url: &String,
+    ) -> Result<Vec<ChromeSession>, Box<dyn std::error::Error>>
+    {
+        let response = reqwest::blocking::get(chrome_json_url)?.json::<Vec<ChromeSession>>()?;
+
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use std::{net::TcpListener, thread::spawn, vec};
+
+    use tungstenite::accept;
+
+    use crate::{ChromeAPI, ChromeSession, ChromiumBrowser};
+
+    struct MockChromeClient;
+    impl ChromeAPI for MockChromeClient
+    {
+        fn get_websocket_session_url(
+            &self,
+            chrome_json_url: &String,
+        ) -> Result<Vec<crate::ChromeSession>, Box<dyn std::error::Error>>
+        {
+            assert_eq!("http://test_url.com", chrome_json_url);
+            Ok(vec![ChromeSession {
+                web_socket_debugger_url: "ws://localhost:8081".to_string(),
+            }])
+        }
+    }
+
+    #[test]
+    fn create_browser()
+    {
+        start_mock_server();
+
+        let url = String::from("http://test_url.com");
+
+        let _browser = match ChromiumBrowser::connect_with_client(&MockChromeClient {}, &url)
+        {
+            Ok(browser) => browser,
+            Err(error) => panic!("{error}"),
+        };
+    }
+
+    fn start_mock_server()
+    {
+        spawn(|| {
+            let server = TcpListener::bind("127.0.0.1:8081").unwrap();
+            for stream in server.incoming()
+            {
+                accept(stream.unwrap()).unwrap();
+            }
+        });
     }
 }

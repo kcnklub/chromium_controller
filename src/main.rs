@@ -1,28 +1,17 @@
 use chrome_controller::ChromiumBrowser;
-use core::panic;
-use json::object;
+use serde_json::json;
 
-#[tokio::main]
-async fn main()
+fn main()
 {
-    let mut browser = ChromiumBrowser::new(String::from("http://localhost:8080/json"));
-    match browser.connect().await
-    {
-        Ok(()) => println!("Connected to chromium!"),
-        Err(error) => panic!("Couldn't connect to chromium: {error}"),
-    }
+    let mut browser = ChromiumBrowser::connect(&String::from("http://localhost:8080/json")).unwrap();
 
-    let mut open_chrome = object! {
-        id: 3,
-        method: "Page.navigate",
-        params: object! {
-            url: "https://veracode.com"
+    let mut open_chrome = json!({
+        "id": 3, 
+        "method": "Page.navigate", 
+        "params": {
+            "url": "https://google.com", 
         }
-    };
+    });
 
-    match browser.run_command(&mut open_chrome).await
-    {
-        Ok(()) => println!("We are golden"),
-        Err(error) => println!("Couldn't run command: {error}"),
-    };
+    browser.run_command(&mut open_chrome).unwrap();
 }
